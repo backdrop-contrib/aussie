@@ -1,0 +1,6 @@
+type = module
+name = Aussie Slang
+description = Automatically converts your website's text into Aussie slang.
+backdrop = 1.x
+configure = admin/config/content/aussie
+tags[] = Filters

@@ -1,0 +1,584 @@
+<?php
+/**
+ * @file
+ * Automatically converts your website's text into Aussie slang.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function aussie_config_info() {
+  return array(
+    'aussie.settings' => array(
+      'label' => t('Aussie Slang settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_filter_info().
+ */
+function aussie_filter_info() {
+  return array(
+    'aussie' => array(
+      'title' => t('Aussie slang'),
+      'process callback' => 'aussie_filter_process',
+    ),
+  );
+}
+
+/**
+ * Convert text into Aussie slang.
+ *
+ * Callback for aussie_filter_info().
+ */
+function aussie_filter_process($text) {
+  $config = config('aussie.settings');
+
+  // Don't do any processing if Aussie slang is only to be shown on Australia
+  // Day, and that's not today.
+  if ($config->get('australia_day') == TRUE && date('dm') != '2601') {
+    return $text;
+  }
+
+  // Get Aussie slang replacement words.
+  $slang = aussie_replacements($config->get('clean'));
+  $patterns = $slang[0];
+  $replacements = $slang[1];
+
+  // Skip tags whose content shouldn't be altered.
+  $ignore_tags = 'script|style|code|pre';
+  $skip_me = FALSE;
+
+  // Split the text into chunks (of alternating content and tags).
+  $chunks = preg_split('#(<.+?>)#s', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+  $is_tag = FALSE;
+
+  foreach ($chunks as &$chunk) {
+    // Skip empty chunks.
+    if (empty(trim($chunk))) {
+      $is_tag = !$is_tag;
+      continue;
+    }
+
+    if ($is_tag) {
+      if (!$skip_me) {
+        // Check if this tag should be skipped.
+        if (preg_match('#<(' . $ignore_tags . ')(?:\s|>)#i', $chunk, $matches)) {
+          $skip_me = $matches[1];
+        }
+      }
+      else {
+        // Check if this is the end of the current skipped tag.
+        if (preg_match('#<\/' . $skip_me . '>#i', $chunk)) {
+          $skip_me = FALSE;
+        }
+      }
+    }
+    else {
+      // Make sure this content isn't in a tag that should be skipped.
+      if (!$skip_me) {
+        // Perform the actual replacement(s).
+        $chunk = preg_replace($patterns, $replacements, $chunk);
+      }
+    }
+
+    $is_tag = !$is_tag;
+  }
+
+  return implode($chunks);
+}
+
+/**
+ * Implements hook_element_info_alter().
+ */
+function aussie_element_info_alter(&$type) {
+  // Add a custom pre_render function to all element types.
+  foreach ($type as &$element_type) {
+    $element_type += array('#pre_render' => array());
+    $element_type['#pre_render'][] = 'aussie_pre_render';
+  }
+}
+
+/**
+ * Run element text through the Aussie Slang filter.
+ *
+ * Callback for aussie_element_info_alter().
+ */
+function aussie_pre_render($element) {
+  $supported_properties = array('#title', '#description', '#markup');
+
+  foreach ($supported_properties as $property) {
+    if (!empty($element[$property])) {
+      $element[$property] = aussie_filter_process($element[$property]);
+    }
+  }
+
+  return $element;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function aussie_menu() {
+  return array(
+    'admin/config/content/aussie' => array(
+      'title' => 'Aussie slang',
+      'description' => 'Configure Aussie Slang settings.',
+      'page callback' => 'backdrop_get_form',
+      'page arguments' => array('aussie_settings_form'),
+      'access arguments' => array('administer site configuration'),
+    ),
+  );
+}
+
+/**
+ * Form constructor for Aussie Slang settings.
+ */
+function aussie_settings_form($form, &$form_state) {
+  $form['#config'] = 'aussie.settings';
+  $config = config($form['#config']);
+
+  $form['clean'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Keep it clean'),
+    '#description' => t('Keep the Aussie slang clean from possibly offensive words.'),
+    '#default_value' => $config->get('clean'),
+  );
+  $form['australia_day'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Australia Day only (26th Jan)'),
+    '#description' => t('Only display Aussie slang once a year on <a href="https://en.wikipedia.org/wiki/Australia_Day">Australia Day</a>.'),
+    '#default_value' => $config->get('australia_day'),
+  );
+
+  return system_settings_form($form);
+}
+
+/**
+ * Get lists of Aussie slang patterns and replacements.
+ *
+ * @param bool $clean
+ *   Whether or not Aussie slang should be kept clean from possibly offensive
+ *   words.
+ *
+ * @return array
+ *   An array with 2 values:
+ *   - An array of patterns.
+ *   - An array of replacements.
+ */
+function aussie_replacements($clean) {
+  $patterns = array();
+  $replacements = array();
+  $slang = aussie_slang();
+
+  foreach ($slang as $key => $value) {
+    // Add default values where not provided.
+    if (!isset($value[1])) {
+      $value[1] = TRUE;
+    }
+
+    // Skip non-clean words if not allowed to be shown.
+    if ($clean && !$value[1]) {
+      continue;
+    }
+
+    // Account for phrase variations (e.g. hyphenated words).
+    $words = explode('|', $value[0]);
+    if (preg_match('#\s#', $value[0])) {
+      foreach ($words as $word) {
+        if ($hyphen = preg_filter('#\s#', '-', $word)) {
+          $value[0] .= '|' . $hyphen;
+        }
+        if ($no_space = preg_filter('#\s#', '', $word)) {
+          $value[0] .= '|' . $no_space;
+        }
+      }
+    }
+
+    // Add words and their variants to the patterns/replacements arrays.
+    $patterns[] = $value[0];
+    $replacements[] = $key;
+    // Sentence case.
+    $patterns[] = implode('|', array_map('ucfirst', $words));
+    $replacements[] = ucfirst($key);
+    // Title case - only if there's whitespace in the string.
+    if (preg_match('#\s#', $key) || preg_match('#\s#', $value[0])) {
+      $patterns[] = implode('|', array_map('ucwords', $words));
+      $replacements[] = ucwords($key);
+    }
+    // Uppercase.
+    $patterns[] = implode('|', array_map('strtoupper', $words));
+    $replacements[] = strtoupper($key);
+  }
+
+  // Add the regex.
+  foreach ($patterns as &$pattern) {
+    $pattern = '#\b(' . $pattern . ')\b#';
+  }
+
+  return array($patterns, $replacements);
+}
+
+/**
+ * Get a list of Aussie slang words.
+ *
+ * This list should be ordered such that more complex variants come first,
+ * followed by simpler ones. This is so the pattern matching works as expected.
+ * For example, if "children" was listed before "children's", the latter would
+ * never be matched. The order should generally be:
+ * - Plural possessive (e.g. toddlers')
+ * - Possessive (e.g. toddler's)
+ * - Plural (e.g. toddlers)
+ * - Singular (e.g. toddler)
+ *
+ * To make the maintenance of this list a bit easier, words given here are
+ * generally all lowercase. Other case variants will then be automatically
+ * generated. For example, 'no worries' gets converted to:
+ * - No worries (sentance case)
+ * - No Worries (title case)
+ * - NO WORRIES (uppercase)
+ *
+ * Different variations of phrases are also accounted for. Words in a phrase
+ * separated by a space are given below (e.g. 'bottle shop'), then other
+ * variants will be auto generated:
+ * - bottle-shop (hyphenated)
+ * - bottleshop (one-word)
+ *
+ * @return array
+ *   An associative array of Aussie slang words where the keys are Aussie
+ *   words/phrases and the values are indexed arrays containing:
+ *   - A required string of the word or words (separated by a '|') that the
+ *     Aussie key will replace.
+ *   - An optional boolean indicating whether or not the words are
+ *     clean/inoffensive. Defaults to TRUE.
+ */
+function aussie_slang() {
+  $slang = array(
+    "Acca Dacca" => array("ac/dc"),
+    "agro" => array("aggravated"),
+    "ambos'" => array("ambulance drivers'|ambulances'"),
+    "ambo's" => array("ambulance driver's|ambulance's"),
+    "ambos" => array("ambulance drivers|ambulances"),
+    "ambo" => array("ambulance driver|ambulance"),
+    "ankle-biters'" => array("children's|toddlers'|kids'"),
+    "ankle-biter's" => array("child's|toddler's|kid's"),
+    "ankle-biters" => array("children|toddlers|kids"),
+    "ankle-biter" => array("child|toddler|kid"),
+    "arvos'" => array("afternoons'"),
+    "arvo's" => array("afternoon's"),
+    "arvos" => array("afternoons"),
+    "arvo" => array("afternoon"),
+    "avos'" => array("avocados'"),
+    "avo's" => array("avocado's'"),
+    "avos" => array("avocados"),
+    "avo" => array("avocado"),
+    "bailing" => array("canceling|cancelling"),
+    "bailed" => array("canceled|cancelled"),
+    "bail" => array("cancel"),
+    "barbies'" => array("barbeques'"),
+    "barbie's" => array("barbeque's"),
+    "barbies" => array("barbeques"),
+    "barbie" => array("barbeque"),
+    "bikkies'" => array("biscuits'|cookies'"),
+    "bikkie's" => array("biscuit's|cookie's"),
+    "bikkies" => array("biscuits|cookies"),
+    "bikkie" => array("biscuit|cookie"),
+    "billies'" => array("teapots'"),
+    "billy's" => array("teapot's"),
+    "billies" => array("teapots"),
+    "billy" => array("teapot"),
+    "blokes'" => array("men's|guys'|lads'|dudes'|boys'|gentlemen's"),
+    "bloke's" => array("man's|guy's|lad's|dude's|boy's|gentleman's"),
+    "blokes" => array("men|guys|lads|dudes|boys|gentlemen"),
+    "bloke" => array("man|guy|lad|dude|boy|gentleman"),
+    "bloody" => array("very|really|extremely|overly", FALSE),
+    "bottle-os'" => array("bottle shops'|liquor stores'"),
+    "bottle-o's" => array("bottle shop's|liquor store's"),
+    "bottle-os" => array("bottle shops|liquor stores"),
+    "bottle-o" => array("bottle shop|liquor store"),
+    "brekkies'" => array("breakfasts'"),
+    "brekkie's" => array("breakfast's"),
+    "brekkies" => array("breakfasts"),
+    "brekkie" => array("breakfast"),
+    "brollies'" => array("umbrellas'"),
+    "brolly's" => array("umbrella's"),
+    "brollies" => array("umbrellas"),
+    "brolly" => array("umbrella"),
+    "budgie smugglers'" => array("speedos'"),
+    "budgie smugglers" => array("speedos"),
+    "buggered" => array("tired|pooped|exhausted", FALSE),
+    "bushes'" => array("countrysides'|forests'|jungles'"),
+    "bush's" => array("countryside's|forest's|jungle's"),
+    "bush" => array("countryside|forest|jungle|countrysides|forests|jungles"),
+    "cactus" => array("dead|broken"),
+    "choc-a-bloc" => array("full"),
+    "choccy bikkies'" => array("chocolate biscuits'|choc biscuits'|choccy biscuits'|chocolate bikkies'|choc bikkies'"),
+    "choccy bikkie's" => array("chocolate biscuit's|choc biscuit's|choccy biscuit's|chocolate bikkie's|choc bikkie's"),
+    "choccy bikkies" => array("chocolate biscuits|choc biscuits|choccy biscuits|chocolate bikkies|choc bikkies"),
+    "choccy bikkie" => array("chocolate biscuit|choc biscuit|choccy biscuit|chocolate bikkie|choc bikkie"),
+    "chooks'" => array("chickens'"),
+    "chook's" => array("chicken's"),
+    "chooks" => array("chickens"),
+    "chook" => array("chicken"),
+    "Chrissies" => array("christmas'|x-mas'|xmas'"),
+    "Chrissie" => array("christmas|x-mas|xmas"),
+    "ciggies'" => array("cigarettes'"),
+    "ciggy's" => array("cigarette's"),
+    "ciggies" => array("cigarettes"),
+    "ciggy" => array("cigarette"),
+    "coldies'" => array("beers'"),
+    "coldie's" => array("beer's"),
+    "coldies" => array("beers"),
+    "coldie" => array("beer"),
+    "coppers'" => array("police men's|police women's"),
+    "copper's" => array("police man's|police woman's"),
+    "coppers" => array("police men|police women"),
+    "copper" => array("police man|police woman"),
+    "crikey" => array("wow"),
+    "crook" => array("ill|un-well|unwell"),
+    "dags'" => array("nerds'|geeks'"),
+    "dag's" => array("nerd's|geek's"),
+    "dags" => array("nerds|geeks"),
+    "dag" => array("nerd|geek"),
+    "daks'" => array("pants'|trousers'"),
+    "daks" => array("pants|trousers"),
+    "defo" => array("definitely"),
+    "devo" => array("devastated"),
+    "dodgy" => array("suspicious"),
+    "dog's breakfast" => array("mess|chaos"),
+    "drongos'" => array("fools'|idiots'"),
+    "drongo's" => array("fool's|idiot's"),
+    "drongos" => array("fools|idiots"),
+    "drongo" => array("fool|idiot"),
+    "dunnies'" => array("toilets'|loos'|potties'|outhouses'"),
+    "dunny's" => array("toilet's|loo's|potty's|outhouse's"),
+    "dunnies" => array("toilets|loos|potties|outhouses"),
+    "dunny" => array("toilet|loo|potty|outhouse"),
+    "Facey's" => array("facebook's"),
+    "Facey" => array("facebook"),
+    "fair dinkum" => array("true"),
+    "flannos'" => array("flannel shirts'|flannelette shirts'"),
+    "flanno's" => array("flannel shirt's|flannelette shirt's"),
+    "flannos" => array("flannel shirts|flannelette shirts"),
+    "flanno" => array("flannel shirt|flannelette shirt"),
+    "flat out" => array("busy"),
+    "footies'" => array("footballs'"),
+    "footy's" => array("football's"),
+    "footies" => array("footballs"),
+    "footy" => array("football"),
+    "fruit loops'" => array("crazy people's|lunatics'"),
+    "fruit loop's" => array("crazy person's|lunatic's"),
+    "fruit loops" => array("crazy people|lunatics"),
+    "fruit loop" => array("crazy person|lunatic"),
+    "g'day" => array("hello|hi|hey"),
+    "gobsmacked" => array("shocked|surprised"),
+    "hard yakka" => array("hard work"),
+    "heaps" => array("lots|loads"),
+    "hoons'" => array("hooligans'"),
+    "hoon's" => array("hooligan's"),
+    "hoons" => array("hooligans"),
+    "hoon" => array("hooligan"),
+    "hooroo" => array("goodbye|bye"),
+    "icy poles'" => array("popsicle sticks'|popsicles'"),
+    "icy pole's" => array("popsicle stick's|popsicle's"),
+    "icy poles" => array("popsicle sticks|popsicles"),
+    "icy pole" => array("popsicle stick|popsicle"),
+    "idiot boxes'" => array("televisions'", FALSE),
+    "idiot box's" => array("television's", FALSE),
+    "idiot boxes" => array("televisions", FALSE),
+    "idiot box" => array("television", FALSE),
+    "iffy" => array("risky"),
+    "journos'" => array("journalists'|reporters'"),
+    "journo's" => array("journalist's|reporter's"),
+    "journos" => array("journalists|reporters"),
+    "journo" => array("journalist|reporter"),
+    "jumpers'" => array("sweaters'"),
+    "jumper's" => array("sweater's"),
+    "jumpers" => array("sweaters"),
+    "jumper" => array("sweater"),
+    "kindies'" => array("kindergartens'"),
+    "kindie's" => array("kindergarten's"),
+    "kindies" => array("kindergartens"),
+    "kindie" => array("kindergarten"),
+    "knocked" => array("criticised|criticized"),
+    "knocks" => array("criticises|criticizes"),
+    "knock" => array("criticise|criticize"),
+    "lappies'" => array("laptops'"),
+    "lappy's" => array("laptop's"),
+    "lappies" => array("laptops"),
+    "lappy" => array("laptop"),
+    "larrakins'" => array("pranksters'|jokers'"),
+    "larrakin's" => array("prankster's|joker's"),
+    "larrakins" => array("pranksters|jokers"),
+    "larrakin" => array("prankster|joker"),
+    "lippies'" => array("lip sticks'"),
+    "lippy's" => array("lip stick's"),
+    "lippies" => array("lip sticks"),
+    "lippy" => array("lip stick"),
+    "lollies" => array("candies|sweets"),
+    "Macca's" => array("mcdonald's|mcDonald's|mcdonalds|mcDonalds"),
+    "mates'" => array("friends'"),
+    "mate's" => array("friend's"),
+    "mates" => array("friends"),
+    "mate" => array("friend"),
+    "mozzies'" => array("mosquitos'|mosquitoes'"),
+    "mozzie's" => array("mosquito's"),
+    "mozzies" => array("mosquitos|mosquitoes"),
+    "mozzie" => array("mosquito"),
+    "mushies'" => array("mushrooms'"),
+    "mushie's" => array("mushroom's"),
+    "mushies" => array("mushrooms"),
+    "mushie" => array("mushroom"),
+    "musos'" => array("musicians'"),
+    "muso's" => array("musician's"),
+    "musos" => array("musicians"),
+    "muso" => array("musician"),
+    "nah" => array("no"),
+    "no worries" => array("no problem"),
+    "nud" => array("nude"),
+    "nuddy" => array("naked"),
+    "onya" => array("on you"),
+    "pissing" => array("urinating"),
+    "pissed" => array("urinated"),
+    "piss" => array("urinate"),
+    "pissed off" => array("annoyed|angry", FALSE),
+    "piss off" => array("get lost|go away", FALSE),
+    "preggas" => array("pregnant", FALSE),
+    "prezzies'" => array("presents'|gifts'"),
+    "prezzie's" => array("present's|gift's"),
+    "prezzies" => array("presents|gifts"),
+    "prezzie" => array("present|gift"),
+    "reckon" => array("think"),
+    "regos'" => array("registrations'"),
+    "rego's" => array("registration's"),
+    "regos" => array("registrations"),
+    "rego" => array("registration"),
+    "relos'" => array("relatives'"),
+    "relo's" => array("relative's"),
+    "relos" => array("relatives"),
+    "relo" => array("relative"),
+    "rocking up" => array("showing up"),
+    "rocked up" => array("showed up|shown up"),
+    "rock up" => array("show up"),
+    "roos'" => array("kangaroos'"),
+    "roo's" => array("kangaroo's"),
+    "roos" => array("kangaroos"),
+    "roo" => array("kangaroo"),
+    "rugging up" => array("dressing warmly"),
+    "rugged up" => array("dressed warmly"),
+    "rug up" => array("dress warmly"),
+    "sangas'" => array("sandwiches'"),
+    "sanga's" => array("sandwich's"),
+    "sangas" => array("sandwiches"),
+    "sanga" => array("sandwich"),
+    "ScoMo's" => array("scott morrison's"),
+    "ScoMo" => array("scott morrison"),
+    "servos'" => array("service stations'|petrol stations'|gas stations'"),
+    "servo's" => array("service station's|petrol station's|gas station's"),
+    "servos" => array("service stations|petrol stations|gas stations"),
+    "servo" => array("service station|petrol station|gas station"),
+    "sheilas'" => array("women's|girls'|ladies'|lasses'"),
+    "sheila's" => array("woman's|girl's|lady's|lass'"),
+    "sheilas" => array("women|girls|ladies|lasses"),
+    "sheila" => array("woman|girl|lady|lass"),
+    "she'll be right" => array("it'll be ok|it'll be okay|it will be ok|it will be okay|it'll be fine|it will be fine"),
+    "shooting through" => array("leaving"),
+    "shoot through" => array("leave"),
+    "sickie" => array("day off work"),
+    "slabs" => array("cartons of beer|cartons of beers"),
+    "slab" => array("carton of beer|carton of beers"),
+    "slackest" => array("laziest"),
+    "slacker" => array("lazier"),
+    "slack" => array("lazy"),
+    "smokos'" => array("cigarette breaks'"),
+    "smoko's" => array("cigarette break's"),
+    "smokos" => array("cigarette breaks"),
+    "smoko" => array("cigarette break"),
+    "snags'" => array("sausages'"),
+    "snag's" => array("sausage's"),
+    "snags" => array("sausages"),
+    "snag" => array("sausage"),
+    "sooks'" => array("cry-babies'|crybabies'"),
+    "sook's" => array("cry-baby's|crybaby's"),
+    "sooks" => array("cry-babies|crybabies"),
+    "sook" => array("cry-baby|crybaby"),
+    "spag bols'" => array("spaghetti bologneses'"),
+    "spag bol's" => array("spaghetti bolognese's"),
+    "spag bols" => array("spaghetti bologneses"),
+    "spag bol" => array("spaghetti bolognese"),
+    "spuds'" => array("potatoes'"),
+    "spud's" => array("potato's"),
+    "spuds" => array("potatoes"),
+    "spud" => array("potato"),
+    "stoked" => array("happy|pleased"),
+    "Straya's" => array("australia's"),
+    "Straya" => array("australia"),
+    "stuffed" => array("tired"),
+    "sunnies'" => array("sun glasses'|shades'"),
+    "sunnies" => array("sun glasses|shades"),
+    "ta" => array("thank you|thanks"),
+    "teas'" => array("dinners'"),
+    "tea's" => array("dinner's"),
+    "teas" => array("dinners"),
+    "tea" => array("dinner"),
+    "thongs'" => array("flip flops'|sandals'"),
+    "thong's" => array("flip flop's|sandal's"),
+    "thongs" => array("flip flops|sandals"),
+    "thong" => array("flip flop|sandal"),
+    "togs'" => array("bathers'|swimsuit's|swimsuits'"),
+    "togs" => array("bathers|swimsuit|swimsuits"),
+    "trackies'" => array("tracksuits'"),
+    "trackie's" => array("tracksuit's"),
+    "trackies" => array("tracksuits"),
+    "trackie" => array("tracksuit"),
+    "tradies'" => array("tradesmen's|tradeswomen's|tradespersons'"),
+    "tradie's" => array("tradesman's|tradeswoman's|tradesperson's"),
+    "tradies" => array("tradesmen|tradeswomen|tradespersons"),
+    "tradie" => array("tradesman|tradeswoman|tradesperson"),
+    "truckies'" => array("truck drivers'"),
+    "truckie's" => array("truck driver's"),
+    "truckies" => array("truck drivers"),
+    "truckie" => array("truck driver"),
+    "tryna" => array("trying to"),
+    "tucker's" => array("food's"),
+    "tucker" => array("food"),
+    "ueys'" => array("u-turns'"),
+    "uey's" => array("u-turn's"),
+    "ueys" => array("u-turns"),
+    "uey" => array("u-turn"),
+    "uggs'" => array("ugg boots'"),
+    "uggs" => array("ugg boots"),
+    "undies'" => array("underwear's|panties'"),
+    "undies" => array("underwear|panties"),
+    "unis'" => array("universities'"),
+    "uni's" => array("university's"),
+    "unis" => array("universities"),
+    "uni" => array("university"),
+    "veggies'" => array("vegetables'"),
+    "veggies" => array("vegetables"),
+    "vegos'" => array("vegetarians'", FALSE),
+    "vego's" => array("vegetarian's", FALSE),
+    "vegos" => array("vegetarians", FALSE),
+    "vego" => array("vegetarian", FALSE),
+    "whinging" => array("complaining"),
+    "whinged" => array("complained"),
+    "whinges" => array("complains"),
+    "whinge" => array("complain"),
+    "wonky" => array("unstable|unsteady|shaky|uneven"),
+    "woop woop" => array("the middle of nowhere"),
+    "wusses'" => array("cowards'"),
+    "wuss'" => array("coward's"),
+    "wusses" => array("cowards"),
+    "wuss" => array("coward"),
+    "ya" => array("you"),
+    "yeh" => array("yes"),
+    "yous" => array("you all"),
+  );
+
+  // Allow the list to be altered.
+  backdrop_alter('aussie_slang', $slang);
+
+  return $slang;
+}
