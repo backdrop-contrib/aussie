@@ -572,7 +572,7 @@ function aussie_slang() {
     "wuss'" => array("coward's"),
     "wusses" => array("cowards"),
     "wuss" => array("coward"),
-    "ya" => array("you"),
+    "ya" => array("you|your"),
     "yeh" => array("yes"),
     "yous" => array("you all"),
   );
